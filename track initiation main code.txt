@@ -1,0 +1,87 @@
+def main():
+    """Main processing loop."""
+    kalman_filter = CVFilter()
+    csv_file_path = 'ttk_84_2.csv'
+
+    try:
+        measurements = read_measurements_from_csv(csv_file_path)
+    except FileNotFoundError:
+        print(f"File not found: {csv_file_path}")
+        return
+    except Exception as e:
+        print(f"Error reading CSV file: {e}")
+        return
+
+    if not measurements:
+        print("No measurements found in the CSV file.")
+        return
+
+    # Track initiation
+    # Initialize the first track ID with the range of the first measurement
+    first_measurement = measurements[0]
+    track_id = 0
+    track_measurements = {track_id: [first_measurement]}
+
+    # Group measurements into tracks
+    for measurement in measurements[1:]:
+        x, y, z, mt = measurement
+        # Check if the measurement is close to any existing track
+        found_track = False
+        for existing_track_id, track_measurements_list in track_measurements.items():
+            # Compare the range of the measurement with the range of the last measurement in the track
+            last_x, last_y, last_z, last_mt = track_measurements_list[-1]
+            if abs(x - last_x) <= 1.0:  # Adjust this threshold as needed
+                # Assign the measurement to the existing track
+                track_measurements[existing_track_id].append(measurement)
+                found_track = True
+                break
+        if not found_track:
+            # Create a new track ID and assign the measurement to it
+            track_id += 1
+            track_measurements[track_id] = [measurement]
+
+    # Now, we have grouped measurements into tracks, let's process each track
+    updated_states = []
+
+    for track_id, track_measurements_list in track_measurements.items():
+        print(f"Processing track {track_id}")
+
+        track_states = []
+        reports = []
+
+        for i, (x, y, z, mt) in enumerate(track_measurements_list):
+            if i == 0:
+                # Initialize filter state with the first measurement
+                kalman_filter.initialize_filter_state(x, y, z, 0, 0, 0, mt)
+            elif i == 1:
+                # Initialize filter state with the second measurement and compute velocity
+                prev_x, prev_y, prev_z = track_measurements_list[i-1][:3]
+                dt = mt - track_measurements_list[i-1][3]
+                vx = (x - prev_x) / dt
+                vy = (y - prev_y) / dt
+                vz = (z - prev_z) / dt
+                kalman_filter.initialize_filter_state(x, y, z, vx, vy, vz, mt)
+            else:
+                kalman_filter.predict_step(mt)
+
+            filtered_state = kalman_filter.Sf.flatten()[:3]
+            r, az, el = cart2sph(filtered_state[0], filtered_state[1], filtered_state[2])
+            track_states.append(filtered_state)
+            reports.append([x, y, z])
+            updated_states.append((mt, r, az, el))
+
+        # Perform clustering, hypothesis generation, and association
+        hypotheses, probabilities = perform_clustering_hypothesis_association(track_states, reports, cov_inv)
+
+        # After association, use the most likely report for track update
+        max_associations, _ = find_max_associations(hypotheses, probabilities, reports)
+        for report_idx, track_idx in enumerate(max_associations):
+            if track_idx != -1:
+                report = reports[report_idx]
+                kalman_filter.update_step(report)  # Pass the associated report to update_step()
+                filtered_state = kalman_filter.Sf.flatten()[:3]
+                r, az, el = cart2sph(filtered_state[0], filtered_state[1], filtered_state[2])
+                updated_states.append((track_measurements_list[report_idx][3], r, az, el))
+
+    # Plotting all data together
+    plot_track_data(updated_states)
